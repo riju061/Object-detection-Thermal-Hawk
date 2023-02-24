@@ -1,118 +1,117 @@
-"""
-Object Detection (On Image) From TF2 Saved Model
-=====================================
-"""
-
-import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'    # Suppress TensorFlow logging (1)
-import pathlib
-import tensorflow as tf
-import cv2
-import argparse
-from google.colab.patches import cv2_imshow
-
-# Enable GPU dynamic memory allocation
-gpus = tf.config.experimental.list_physical_devices('GPU')
-for gpu in gpus:
-    tf.config.experimental.set_memory_growth(gpu, True)
-
-# PROVIDE PATH TO IMAGE DIRECTORY
-IMAGE_PATHS = '/content/training_demo/images/train/image1.jpg'
-
-
-# PROVIDE PATH TO MODEL DIRECTORY
-PATH_TO_MODEL_DIR = '/content/training_demo/exported_models/my_model'
-
-# PROVIDE PATH TO LABEL MAP
-PATH_TO_LABELS = '/content/training_demo/annotations/label_map.pbtxt'
-
-# PROVIDE THE MINIMUM CONFIDENCE THRESHOLD
-MIN_CONF_THRESH = float(0.60)
-
-# LOAD THE MODEL
-
-import time
-from object_detection.utils import label_map_util
-from object_detection.utils import visualization_utils as viz_utils
-
-PATH_TO_SAVED_MODEL = PATH_TO_MODEL_DIR + "/saved_model"
-
-print('Loading model...', end='')
-start_time = time.time()
-
-# LOAD SAVED MODEL AND BUILD DETECTION FUNCTION
-detect_fn = tf.saved_model.load(PATH_TO_SAVED_MODEL)
-
-end_time = time.time()
-elapsed_time = end_time - start_time
-print('Done! Took {} seconds'.format(elapsed_time))
-
-# LOAD LABEL MAP DATA FOR PLOTTING
-
-category_index = label_map_util.create_category_index_from_labelmap(PATH_TO_LABELS,
-                                                                    use_display_name=True)
-
 import numpy as np
+import os
+import six.moves.urllib as urllib
+import sys
+import tarfile
+import tensorflow as tf
+import zipfile
+import json
+
+from io import StringIO
 from PIL import Image
+from watson_developer_cloud import VisualRecognitionV3
+
 import matplotlib.pyplot as plt
-import warnings
-warnings.filterwarnings('ignore')   # Suppress Matplotlib warnings
+import matplotlib.patches as patches
 
-def load_image_into_numpy_array(path):
-    """Load an image from file into a numpy array.
-    Puts image into numpy array to feed into tensorflow graph.
-    Note that by convention we put it into a numpy array with shape
-    (height, width, channels), where channels=3 for RGB.
-    Args:
-      path: the file path to the image
-    Returns:
-      uint8 numpy array with shape (img_height, img_width, 3)
-    """
-    return np.array(Image.open(path))
+# Replace with your api key
+visual_recognition = VisualRecognitionV3('2016-05-20', api_key='INSERT_API_KEY_HERE')
 
+MAX_NUMBER_OF_BOXES = 10
+MINIMUM_CONFIDENCE = 0.6
 
+COLORS = ['b', 'g', 'r', 'c', 'm', 'y', 'b', 'w']
 
+# What model to download.
+MODEL_NAME = 'ssd_mobilenet_v1_coco_11_06_2017'
+MODEL_FILE = MODEL_NAME + '.tar.gz'
+DOWNLOAD_BASE = 'http://download.tensorflow.org/models/object_detection/'
 
-print('Running inference for {}... '.format(IMAGE_PATHS), end='')
+# Path to frozen detection graph. This is the actual model that is used for the object detection.
+PATH_TO_CKPT = MODEL_NAME + '/frozen_inference_graph.pb'
 
-image = cv2.imread(IMAGE_PATHS)
-image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-image_expanded = np.expand_dims(image_rgb, axis=0)
+print('Downloading model... (This may take over 5 minutes)')
+# Download model if not already downloaded
+if not os.path.exists(PATH_TO_CKPT):
+    opener = urllib.request.URLopener()
+    opener.retrieve(DOWNLOAD_BASE + MODEL_FILE, MODEL_FILE)
+    print('Extracting...')
+    tar_file = tarfile.open(MODEL_FILE)
+    for file in tar_file.getmembers():
+        file_name = os.path.basename(file.name)
+        if 'frozen_inference_graph.pb' in file_name:
+            tar_file.extract(file, os.getcwd())
+else:
+    print('Model already downloaded')
 
-# The input needs to be a tensor, convert it using `tf.convert_to_tensor`.
-input_tensor = tf.convert_to_tensor(image)
-# The model expects a batch of images, so add an axis with `tf.newaxis`.
-input_tensor = input_tensor[tf.newaxis, ...]
+# Load model into memory
+print('Loading model...')
+detection_graph = tf.Graph()
+with detection_graph.as_default():
+    od_graph_def = tf.GraphDef()
+    with tf.gfile.GFile(PATH_TO_CKPT, 'rb') as fid:
+        serialized_graph = fid.read()
+        od_graph_def.ParseFromString(serialized_graph)
+        tf.import_graph_def(od_graph_def, name='')
 
-# input_tensor = np.expand_dims(image_np, 0)
-detections = detect_fn(input_tensor)
+def load_image_into_numpy_array(image):
+    (im_width, im_height) = image.size
+    return np.array(image.getdata()).reshape(
+    (im_height, im_width, 3)).astype(np.uint8)
 
-# All outputs are batches tensors.
-# Convert to numpy arrays, and take index [0] to remove the batch dimension.
-# We're only interested in the first num_detections.
-num_detections = int(detections.pop('num_detections'))
-detections = {key: value[0, :num_detections].numpy()
-               for key, value in detections.items()}
-detections['num_detections'] = num_detections
+# Path to test image, "test_image/image1.jpg"
+TEST_IMAGE_PATH = 'test_image/image1.jpg'
 
-# detection_classes should be ints.
-detections['detection_classes'] = detections['detection_classes'].astype(np.int64)
+print('detecting...')
+with detection_graph.as_default():
+    with tf.Session(graph=detection_graph) as sess:
+        image = Image.open(TEST_IMAGE_PATH)
+        image_np = load_image_into_numpy_array(image)
+        image_np_expanded = np.expand_dims(image_np, axis=0)
+        image_tensor = detection_graph.get_tensor_by_name('image_tensor:0')
+        boxes = detection_graph.get_tensor_by_name('detection_boxes:0')
+        scores = detection_graph.get_tensor_by_name('detection_scores:0')
+        num_detections = detection_graph.get_tensor_by_name('num_detections:0')
+        # Actual detection.
+        (boxes, scores, num_detections) = sess.run([boxes, scores, num_detections], feed_dict={image_tensor: image_np_expanded})
 
-image_with_detections = image.copy()
+        # Create figure and axes and display the image
+        fig, ax = plt.subplots(1)
+        ax.imshow(image_np)
 
-# SET MIN_SCORE_THRESH BASED ON YOU MINIMUM THRESHOLD FOR DETECTIONS
-viz_utils.visualize_boxes_and_labels_on_image_array(
-      image_with_detections,
-      detections['detection_boxes'],
-      detections['detection_classes'],
-      detections['detection_scores'],
-      category_index,
-      use_normalized_coordinates=True,
-      max_boxes_to_draw=200,
-      min_score_thresh=0.5,
-      agnostic_mode=False)
+        (height, width, x) = image_np.shape
+        for i in range(0, int(min(num_detections, MAX_NUMBER_OF_BOXES))):
+            score = np.squeeze(scores)[i]
 
-print('Done')
-# DISPLAYS OUTPUT IMAGE
-cv2_imshow(image_with_detections)
-# CLOSES WINDOW ONCE KEY IS PRESSED
+            if score < MINIMUM_CONFIDENCE:
+                break
+            box = np.squeeze(boxes)[i]
+
+            box_x = box[1] * width
+            box_y = box[0] * height
+            box_width = (box[3] - box[1]) * width
+            box_height = (box[2] - box[0]) * height
+
+            box_x2 = box[3] * width
+            box_y2 = box[2] * height
+
+            img2 = image.crop((box_x, box_y, box_x2, box_y2))
+
+            path = 'cropped/image1'
+            os.makedirs(path, exist_ok=True)
+            full_path = os.path.join(path, 'img{}.jpg'.format(i))
+            img2.save(full_path)
+
+            # Classify images with watson visual recognition
+            with open(full_path, 'rb') as images_file:
+                parameters = json.dumps({'threshold': 0.7, 'classifier_ids': ['default']})
+                results = visual_recognition.classify(images_file=images_file, parameters=parameters)
+                print(json.dumps(results, indent=2))
+                label = results['images'][0]['classifiers'][0]['classes'][0]['class']
+                ax.text(box_x + 5, box_y - 5, label, fontsize=10, color='white', bbox={'facecolor':COLORS[i % 8], 'edgecolor':'none'})
+
+            # Create a Rectangle patch
+            rect = patches.Rectangle((box_x, box_y), box_width, box_height, linewidth=2, edgecolor=COLORS[i % 8], facecolor='none')
+            ax.add_patch(rect)
+
+        plt.show()
